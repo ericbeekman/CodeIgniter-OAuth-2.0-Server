@@ -54,6 +54,10 @@ class Oauth_resource_server
 	public function __construct()
 	{
 		$this->ci = get_instance();
+		
+		require_once(APPPATH.'/libraries/Mongo_db.php');
+		$this->ci->load->library('mongo_db');
+		
 		$this->init();
 	}
 	
@@ -100,7 +104,7 @@ class Oauth_resource_server
 				}
 				break;
 		}
-
+		
 		// Try and get an access token from the auth header
 		if (function_exists('apache_request_headers'))
 		{
@@ -117,21 +121,23 @@ class Oauth_resource_server
 		
 		if ($access_token)
 		{
-			$session_query = $this->ci->db->get_where('oauth_sessions', array('access_token' => $access_token, 'stage' => 'granted'));
+			$session_query = $this->ci->mongo_db->get_where('oauth_sessions', array('access_token' => $access_token, 'stage' => 'granted'));
 			
-			if ($session_query->num_rows() === 1)
+			if (count($session_query) === 1)
 			{
-				$session = $session_query->row();
+				$session = (object) $session_query[0];
 				$this->_access_token = $session->access_token;
 				$this->_type = $session->type;
 				$this->_type_id = $session->type_id;
+				$this->{'session_id'} = $session->_id;
 				
-				$scopes_query = $this->ci->db->get_where('oauth_session_scopes', array('access_token' => $access_token));
-				if ($scopes_query->num_rows() > 0)
+				$scopes_query = $this->ci->mongo_db->get_where('oauth_session_scopes', array('session_id' => $this->{'session_id'}));
+				if (count($scopes_query) > 0)
 				{
-					foreach ($scopes_query->result() as $scope)
+					foreach ($scopes_query as $scope)
 					{
-						$this->_scopes[] = $scope->scope;
+						$obj = (object) $scope;
+						$this->_scopes[] = $obj->scope;
 					}
 				}
 			}

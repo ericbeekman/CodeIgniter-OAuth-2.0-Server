@@ -7,7 +7,7 @@
  * @author    Alex Bilbie <alex@alexbilbie.com>
  * @copyright 2012 Alex Bilbie
  * @license   MIT Licencse http://www.opensource.org/licenses/mit-license.php
- * @version   Version 0.2
+ * @version   Version 0.2.1 (MongoDB converted by Eric Beekman<eric@nul76.nl>)
  * @link      https://github.com/alexbilbie/CodeIgniter-OAuth-2.0-Server
  */
 class Oauth_server
@@ -30,6 +30,9 @@ class Oauth_server
 	public function __construct()
 	{
 		$this->ci = get_instance();
+		
+		require_once(APPPATH.'/libraries/Mongo_db.php');
+		$this->ci->load->library('mongo_db');
 	}
 		
 	/**
@@ -58,15 +61,14 @@ class Oauth_server
 			$params['redirect_uri'] = $redirect_uri;
 		}
 	
-		$client_check_query = $this->ci->db
+		$client_check_query = $this->ci->mongo_db
 										->select(array('name', 'client_id', 'auto_approve'))
 										->get_where('applications', $params);
 						
-		if ($client_check_query->num_rows() === 1)
+		if (count($client_check_query) === 1)
 		{
-			return $client_check_query->row();
+			return (object) $client_check_query[0];
 		}
-		
 		else
 		{
 			return FALSE;
@@ -92,19 +94,20 @@ class Oauth_server
 		{
 			$code = md5(time().uniqid());
 			
-			$this->ci->db
+			$this->ci->mongo_db
 						->where(array(
 							'type_id'		=> $user_id,
 							'type'			=> 'user',
 							'client_id'		=> $client_id,
 							'access_token'	=> $access_token
 						))
-						->update('oauth_sessions', array(
+						->set(array(
 							'code'			=> $code,
 							'stage'			=> 'request',
 							'redirect_uri'	=> $redirect_uri, // The applications redirect URI may have been updated
-							'last_updated'	=> time()
-						));
+							'last_updated'	=> new MongoDate(strtotime('now'))
+						))
+						->update('oauth_sessions');
 				
 			return $code;
 		}
@@ -113,28 +116,30 @@ class Oauth_server
 		else
 		{
 			// Delete any existing sessions just to be sure
-			$this->ci->db
-						->delete('oauth_sessions', array(
+			$this->ci->mongo_db
+						->where(array(
 							'client_id'		=> $client_id,
 							'type_id'		=> $user_id,
 							'type'			=> 'user'
-						));
+						))
+						->delete('oauth_sessions');
 		
 			$code = md5(time().uniqid());
 			
-			$this->ci->db
+			$session_id = $this->ci->mongo_db
 						->insert('oauth_sessions', array(
-							'client_id'		=>	$client_id,
-							'redirect_uri'	=>	$redirect_uri,
-							'type_id'		=>	$user_id,
-							'type'			=>	'user',
-							'code'			=>	$code,
-							'first_requested'	=> time(),
-							'last_updated'	=>	time(),
-							'access_token'	=>	NULL
+							'client_id'			=>	$client_id,
+							'redirect_uri'		=>	$redirect_uri,
+							'type_id'			=>	$user_id,
+							'type'				=>	'user',
+							'code'				=>	$code,
+							'first_requested'	=>  new MongoDate(strtotime('now')),
+							'last_updated'		=>	new MongoDate(strtotime('now')),
+							'stage'				=>	'request',
+							'access_token'		=>	NULL
 						));
 					
-			$session_id = $this->ci->db->insert_id();
+			//$session_id = $this->ci->mongo_db->insert_id();
 			
 			// Add the scopes
 			foreach ($scopes as $scope)
@@ -143,7 +148,7 @@ class Oauth_server
 				
 				if(trim($scope) !== '')
 				{
-					$this->ci->db
+					$this->ci->mongo_db
 								->insert('oauth_session_scopes', array(
 									'session_id'	=>	$session_id,
 									'scope'			=>	$scope
@@ -168,7 +173,7 @@ class Oauth_server
 	 */
 	public function validate_auth_code($code = '', $client_id = '', $redirect_uri = '')
 	{
-		$validate = $this->ci->db
+		$validate = $this->ci->mongo_db
 								->select(array('id', 'type_id'))
 								->get_where('oauth_sessions', array(
 									'client_id'		=> $client_id,
@@ -176,14 +181,14 @@ class Oauth_server
 									'code'			=> $code
 								));
 		
-		if ($validate->num_rows() === 0)
+		if (count($validate) === 0)
 		{
 			return FALSE;
 		}
 		
 		else
 		{
-			return $validate->row();
+			return (object) $validate[0];
 		}
 	}
 	
@@ -198,26 +203,26 @@ class Oauth_server
 	public function get_access_token($session_id = '')
 	{
 		// Check if an access token exists already
-		$exists_query = $this->ci->db
+		$exists_query = $this->ci->mongo_db
 									->select('access_token')
-									->get_where('oauth_sessions', array(
-										'id' => $session_id,
-										'access_token IS NOT NULL' => NULL
-									));
+									->where('_id', $session_id)
+									->where_ne('access_token', NULL)
+									->get('oauth_sessions');
 		
 		// If an access token already exists, return it and remove the authorization code
-		if ($exists_query->num_rows() === 1)
+		if (count($exists_query) === 1)
 		{
 			// Remove the authorization code
-			$this->ci->db
-						->where(array('id' => $session_id))
-						->update('oauth_sessions', array(
+			$this->ci->mongo_db
+						->where(array('_id' => $session_id))
+						->set(array(
 							'code'	=>	NULL,
 							'stage'	=>	'granted'
-						));
+						))
+						->update('oauth_sessions');
 			
 			// Return the access token
-			$exists = $exists_query->row();
+			$exists = (object) $exists_query[0];
 			return $exists->access_token;
 		}
 		
@@ -229,21 +234,21 @@ class Oauth_server
 			$updates = array(
 				'code'			=>	NULL,
 				'access_token'	=>	$access_token,
-				'last_updated'	=>	time(),
+				'last_updated'	=>	new MongoDate(strtotime('now')),
 				'stage'			=>	'granted'
 			);
-			
+						
 			// Update the OAuth session
-			$this->ci->db
-						->where(array('id' => $session_id))
+			$this->ci->mongo_db
+						->where(array('_id' => new MongoId($session_id)))
+						->set($updates)
 						->update('oauth_sessions', $updates);
 			
 			// Update the session scopes with the access token
-			$this->ci->db
+			$this->ci->mongo_db
 						->where(array('session_id' => $session_id))
-						->update('oauth_session_scopes', array(
-							'access_token'	=>	$access_token
-						));
+						->set(array('access_token'	=>	$access_token))
+						->update('oauth_session_scopes');
 
 			return $access_token;
 		}
@@ -261,14 +266,14 @@ class Oauth_server
 	public function validate_access_token($access_token = '', $scopes = array())
 	{
 		// Validate the token exists
-		$valid_token = $this->ci->db
+		$valid_token = $this->ci->mongo_db
 									->where(array(
 										'access_token'	=>	$access_token
 									))
 									->get('oauth_sessions');
 		
 		// The access token doesn't exists
-		if ($valid_token->num_rows() === 0)
+		if (count($valid_token) === 0)
 		{
 			return FALSE;
 		}
@@ -276,18 +281,18 @@ class Oauth_server
 		// The access token does exist, validate each scope
 		else
 		{
-			$token = $valid_token->row();
+			$token = (object) $valid_token[0];
 		
 			if (count($scopes) > 0)
 			{
 				foreach ($scopes as $scope)
 				{
-					$scope_exists = $this->ci->db
+					$scope_exists = $this->ci->mongo_db
 												->where(array(
 													'access_token'	=>	$access_token,
 													'scope'			=>	$scope
 												))
-												->count_all_results('oauth_session_scopes');
+												->count('oauth_session_scopes');
 					
 					if ($scope_exists === 0)
 					{
@@ -317,19 +322,18 @@ class Oauth_server
 	 */
 	public function access_token_exists($user_id = '', $client_id = '')
 	{
-		$token_query = $this->ci->db
+		$token_query = $this->ci->mongo_db
 									->select('access_token')
-									->get_where('oauth_sessions', array(
+									->where(array(
 										'client_id'					=> $client_id,
 										'type_id'					=> $user_id,
-										'type'						=> 'user',
-										'access_token != '			=> '',
-										'access_token IS NOT NULL'	=> NULL
-									));
+										'type'						=> 'user'))
+									->where_ne('access_token', NULL)
+									->get('oauth_sessions');
 		
-		if ($token_query->num_rows() === 1)
+		if (count($token_query) === 1)
 		{
-			return $token_query->row();
+			return (object) $token_query[0];
 		}
 		
 		else
@@ -348,10 +352,9 @@ class Oauth_server
 	 */
 	public function scope_exists($scope = '')
 	{
-		$exists = $this->ci->db
+		$exists = $this->ci->mongo_db
 							->where('scope', $scope)
-							->from('scopes')
-							->count_all_results();
+							->count('scopes');
 		
 		return ($exists === 1) ? TRUE : FALSE;
 	}
@@ -368,27 +371,28 @@ class Oauth_server
 	{
 		if (is_array($scopes))
 		{
-			$scope_details = $this->ci->db
+			$scope_details = $this->ci->mongo_db
 									->where_in('scope', $scopes)
 									->get('scopes');
 		}
 		
 		else
 		{
-			$scope_details = $this->ci->db
+			$scope_details = $this->ci->mongo_db
 									->where('scope', $scopes)
 									->get('scopes');
 		}
 		
 		$scopes = array();
 		
-		if ($scope_details->num_rows() > 0)
+		if (count($scope_details) > 0)
 		{
-			foreach ($scope_details->result() as $detail)
+			foreach ($scope_details as $detail)
 			{
+				$obj = (object) $detail;
 				$scopes[] = array(
-					'name' => $detail->name,
-					'description' => $detail->description
+					'name' => $obj->name
+					//,'description' => $obj->description
 				);
 			}
 		}
@@ -420,7 +424,6 @@ class Oauth_server
 		return $redirect_uri;
 	}
 	
-		
 	/**
 	 * Sign the user into your application.
 	 *
@@ -435,7 +438,16 @@ class Oauth_server
 	 */
 	public function validate_user($username = '', $password = '')
 	{
-		// Your code here
+		$u = new User($username, $password);
+		if($u instanceof User && $u->check_login())
+		{ 
+			return $u;
+		}
+		else
+		{
+			return false;
+		}
+		
 	}
 		
 }
